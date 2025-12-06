@@ -1,194 +1,210 @@
+import sys
+import re
+
 class PyStack:
     def __init__(self):
         self.stack = []
         self.memory = {}
+        self.functions = {}
         self.tokens = []
-        self.jumps = {} 
-        # 定义运算符优先级
-        self.precedence = {'+': 1, '-': 1, '*': 2, '/': 2, '>': 0, '<': 0, '==': 0}
+        self.jumps = {}
+        # 定义所有运算符及其优先级
+        self.precedence = {
+            '+': 1, '-': 1, '*': 2, '/': 2, 
+            '>': 0, '<': 0, '==': 0, '!=': 0, 
+            '>=': 0, '<=': 0
+        }
 
-    def shunting_yard(self, expression_tokens):
-        """
-        核心算法：将中缀表达式 (1 + 2) 转为 后缀表达式 (1 2 +)
-        同时自动处理变量加载：遇到 'a' 自动转为 'load a'
-        """
-        output_queue = []
-        operator_stack = []
-
-        for token in expression_tokens:
-            # 1. 如果是数字
-            if token.replace('.', '', 1).isdigit():
-                output_queue.append(token)
-            # 2. 如果是变量名 (非数字、非符号)
-            elif token.isidentifier() and token not in ['true', 'false']:
-                # 关键点：在中缀表达式里看到变量 'x'，意味着要把它的值取出来
-                # 所以我们生成两个指令：'load' 和 'x'
-                # 但是为了保持 RPN 队列纯净，我们稍后在 execute 时处理，或者在这里直接展开
-                # 这里我们选择直接展开指令
-                output_queue.append("load") 
-                output_queue.append(token)
-            # 3. 如果是左括号
-            elif token == '(':
-                operator_stack.append(token)
-            # 4. 如果是右括号
-            elif token == ')':
-                while operator_stack and operator_stack[-1] != '(':
-                    output_queue.append(operator_stack.pop())
-                operator_stack.pop() # 弹出 '('
-            # 5. 如果是运算符
-            elif token in self.precedence:
-                while (operator_stack and operator_stack[-1] in self.precedence and
-                       self.precedence[operator_stack[-1]] >= self.precedence[token]):
-                    output_queue.append(operator_stack.pop())
-                operator_stack.append(token)
-            # 6. 其他 (字符串等)
-            else:
-                output_queue.append(token)
-
-        while operator_stack:
-            output_queue.append(operator_stack.pop())
-        
-        return output_queue
-
-    def parse(self, code):
-        self.tokens = []
-        lines = code.split('\n')
-        
-        for line in lines:
+    def tokenize(self, source_code):
+        raw_tokens = []
+        for line in source_code.split('\n'):
             line = line.split('#')[0].strip()
             if not line: continue
-
-            # --- 新增逻辑：检测赋值语句 (a = ...) ---
-            if '=' in line and '==' not in line: 
-                # 注意：简单的根据 = 分割，不处理 if a == b
-                # 这里假设赋值语句必须是： 变量 = 表达式
-                parts = line.split('=', 1)
-                var_name = parts[0].strip()
-                expression = parts[1].strip()
-                
-                # 1. 处理表达式部分的空格 (把 (1+2) 变成 1 + 2)
-                expr_tokens = expression.replace('(', ' ( ').replace(')', ' ) ').split()
-                
-                # 2. 将表达式转为 RPN 指令
-                rpn_tokens = self.shunting_yard(expr_tokens)
-                self.tokens.extend(rpn_tokens)
-                
-                # 3. 添加赋值指令
-                self.tokens.append('store')
-                self.tokens.append(var_name)
-                
+            
+            # --- 修复核心：优先匹配双字符运算符 (<=, >=, ==, !=) ---
+            # 正则逻辑：字符串 | 双符号 | 单符号 | 单词
+            pattern = r'"[^"]*"|==|!=|<=|>=|[()=]|[^\s()=]+'
+            matches = re.findall(pattern, line)
+            
+            # 检测赋值语句 "i = i + 1"
+            if '=' in matches and matches[0] != 'if' and '==' not in matches and '<=' not in matches and '>=' not in matches:
+                try:
+                    eq_index = matches.index('=')
+                    var_name = matches[0]
+                    expression = matches[eq_index+1:]
+                    rpn = self.shunting_yard(expression)
+                    raw_tokens.extend(rpn)
+                    raw_tokens.append('store')
+                    raw_tokens.append(var_name)
+                except ValueError:
+                    print(f"Syntax Error in line: {line}")
             else:
-                # 兼容旧语法：直接分割
-                # 也要处理括号加空格，方便混合使用
-                clean_line = line.replace('(', ' ( ').replace(')', ' ) ')
-                self.tokens.extend(clean_line.split())
+                raw_tokens.extend(matches)
+        return raw_tokens
 
-        # --- 下面是原来的跳转表构建逻辑 (保持不变) ---
-        stack_control = []
+    def shunting_yard(self, expr_tokens):
+        output = []
+        ops = []
+        for token in expr_tokens:
+            # 识别数字 (包括负数)
+            is_num = token.replace('.', '', 1).isdigit() or (token.startswith('-') and len(token)>1)
+            
+            if is_num: output.append(token)
+            elif token.startswith('"'): output.append(token)
+            elif token.isidentifier() and token not in ['true', 'false']: 
+                output.append('load')
+                output.append(token)
+            elif token == '(': ops.append(token)
+            elif token == ')':
+                while ops and ops[-1] != '(': output.append(ops.pop())
+                if ops: ops.pop()
+            elif token in self.precedence:
+                while (ops and ops[-1] in self.precedence and 
+                       self.precedence[ops[-1]] >= self.precedence[token]):
+                    output.append(ops.pop())
+                ops.append(token)
+            else:
+                output.append(token)
+        while ops: output.append(ops.pop())
+        return output
+
+    def compile(self, source_code):
+        self.tokens = self.tokenize(source_code)
+        self.jumps = {}
+        self.functions = {}
+        control_stack = []
+        
         for i, token in enumerate(self.tokens):
-            if token in ['if', 'while']:
-                stack_control.append((token, i))
+            if token == 'if': control_stack.append(('if', i))
             elif token == 'else':
-                # 简化处理，实际需要回填 jumps
-                pass 
+                if not control_stack: raise SyntaxError("Else without If")
+                match_type, match_idx = control_stack.pop()
+                self.jumps[match_idx] = i + 1
+                control_stack.append(('else', i))
+            elif token == 'while': control_stack.append(('while', i))
+            elif token == 'do': control_stack.append(('do', i))
+            elif token == 'def': 
+                control_stack.append(('def', i))
+                if i + 1 < len(self.tokens):
+                    self.functions[self.tokens[i+1]] = {'start': i + 2}
             elif token == 'end':
-                # 简化处理
-                pass
-        # (为了代码简洁，这里省略复杂的 Jump 构建，直接复用之前的运行时扫描逻辑)
+                if not control_stack: raise SyntaxError("Unexpected End")
+                match_type, match_idx = control_stack.pop()
+                
+                if match_type in ['if', 'else']: 
+                    self.jumps[match_idx] = i + 1
+                elif match_type == 'do':
+                    while_type, while_idx = control_stack.pop()
+                    self.jumps[i] = while_idx 
+                    self.jumps[match_idx] = i + 1
+                elif match_type == 'def':
+                    self.jumps[match_idx] = i + 1
+                    self.functions[self.tokens[match_idx+1]]['end'] = i
 
-    def run(self, code):
-        self.parse(code)
-        self.execute(0, len(self.tokens))
+    def run(self, source_code):
+        print("--- Running ---")
+        try:
+            self.stack = []
+            self.compile(source_code)
+            self.execute(0, len(self.tokens))
+        except Exception as e:
+            # 打印详细错误信息
+            import traceback
+            traceback.print_exc()
+
+    def check_stack(self, count=1, msg="Stack Underflow"):
+        if len(self.stack) < count:
+            raise RuntimeError(f"{msg}. Stack: {self.stack}")
 
     def execute(self, ip, limit):
+        # 设置最大循环次数防止死循环，或者依赖 Python 递归深度限制
         while ip < limit:
             token = self.tokens[ip]
             
-            # 1. 数字处理 (包含对负数的简单支持)
-            if token.replace('.', '', 1).isdigit() or (token.startswith('-') and len(token) > 1):
+            # 1. 数字 & 字符串
+            if token.replace('.', '', 1).isdigit() or (token.startswith('-') and len(token)>1):
                 self.stack.append(float(token) if '.' in token else int(token))
-            
-            # 2. 变量操作
+            elif token.startswith('"'): self.stack.append(token.strip('"'))
+            elif token == 'true': self.stack.append(True)
+            elif token == 'false': self.stack.append(False)
+
+            # 2. 变量
             elif token == 'load':
                 ip += 1
                 self.stack.append(self.memory[self.tokens[ip]])
             elif token == 'store':
                 ip += 1
+                self.check_stack(1, f"Cannot store to {self.tokens[ip]}")
                 self.memory[self.tokens[ip]] = self.stack.pop()
-            
-            # 3. 数学运算 (修复版)
-            elif token in ['+', '-', '*', '/', '>', '<', '==']:
+
+            # 3. 栈操作
+            elif token == 'print': 
+                self.check_stack(1, "Empty stack at 'print'")
+                print(f">> {self.stack.pop()}")
+            elif token == 'dup': 
+                self.check_stack(1, "Empty stack at 'dup'")
+                self.stack.append(self.stack[-1])
+            elif token == 'drop': 
+                self.check_stack(1, "Empty stack at 'drop'")
+                self.stack.pop()
+
+            # 4. 数学运算
+            elif token in self.precedence:
+                self.check_stack(2, f"Not enough operands for '{token}'")
                 b = self.stack.pop()
                 a = self.stack.pop()
                 if token == '+': self.stack.append(a + b)
                 elif token == '-': self.stack.append(a - b)
                 elif token == '*': self.stack.append(a * b)
-                elif token == '/': self.stack.append(a / b) # 加上除法
+                elif token == '/': self.stack.append(a / b)
                 elif token == '>': self.stack.append(a > b)
-                elif token == '<': self.stack.append(a < b) # <--- 补上了这行！
+                elif token == '<': self.stack.append(a < b)
                 elif token == '==': self.stack.append(a == b)
+                elif token == '!=': self.stack.append(a != b)
+                elif token == '>=': self.stack.append(a >= b)
+                elif token == '<=': self.stack.append(a <= b)
+
+            # 5. 控制流
+            elif token == 'if' or token == 'do':
+                self.check_stack(1, f"No condition for '{token}'")
+                cond = self.stack.pop()
+                if not cond:
+                    ip = self.jumps[ip] - 1
             
-            elif token == 'print':
-                print(f"Output: {self.stack.pop()}")
-            
-            # 4. 控制流
-            elif token == 'while': 
-                pass 
-            elif token == 'do':
-                # 如果栈顶是 False，跳到 end
-                if not self.stack.pop(): 
-                    nest = 1
-                    while nest > 0:
-                        ip += 1
-                        # 防止越界
-                        if ip >= len(self.tokens): break 
-                        if self.tokens[ip] in ['while', 'if']: nest+=1
-                        if self.tokens[ip] == 'end': nest-=1
+            elif token in ['else', 'def']:
+                ip = self.jumps[ip] - 1
             
             elif token == 'end':
-                # 回跳逻辑
-                back = ip
-                nest = 0
-                is_loop = False
-                while back > 0:
-                    back -= 1
-                    if self.tokens[back] == 'end': nest += 1
-                    if self.tokens[back] == 'while':
-                        if nest == 0: 
-                            ip = back - 1 # 跳到 while 前一个位置
-                            is_loop = True
-                            break
-                        nest -= 1
-            
+                if ip in self.jumps: ip = self.jumps[ip] - 1
+
+            elif token == 'call':
+                ip += 1
+                func_name = self.tokens[ip]
+                meta = self.functions[func_name]
+                self.execute(meta['start'], meta['end'])
+
             ip += 1
 
-
+# --- 测试用例 ---
 vm = PyStack()
-
 code = """
-# 1. 直接赋值
-a = 10
-b = 20
+"--- Test 1: Math ---" print   # <--- 注意：字符串在前，print 在后
+x = 10
+y = 20
+z = ( x + y ) * 2
+load z print
 
-# 2. 复杂的数学表达式 (自动处理优先级)
-# 这行代码会自动翻译成: load a, load b, +, 2, *, store c
-c = ( a + b ) * 2 
-load c print
-
-# 3. 混合使用：在 While 循环里使用赋值
-# 逻辑：从 0 加到 4
-i = 0
-sum = 0
-
-while load i 5 < do
-    # 以前是: load sum load i + store sum
-    # 现在可以是:
-    sum = sum + i
-    i = i + 1
+"--- Test 2: Factorial ---" print
+def fact
+    dup 1 <= if    # Stack: [n, n, 1] -> [n, Bool]
+        drop 1     # If True: Drop n, return 1
+    elseFactorial
+        dup 1 -    # If False: [n, n-1]
+        call fact  # [n, result]
+        * # [n * result]
+    end
 end
 
-load sum print
+5 call fact print
 """
-
-print("--- 开始运行 ---")
 vm.run(code)
